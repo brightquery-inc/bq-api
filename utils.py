@@ -2702,7 +2702,7 @@ def append_response(response, search_universe, search_product):
         elif search_universe=='executives':
             response_df['bq_freq_count'] = response_df.groupby(['bq_executive_id'])['bq_match_types'].transform('nunique').astype(np.int64, errors='ignore')
         
-        if search_product =='BUSINESS_IDENTITY_API':
+        if (search_product =='BQ_BUSINESS_IDENTITY_API') | (search_product =='BQ_ID_API'):
             if 'bq_revenue_mr' in response_df:
                 response_df['bq_revenue_range']=response_df.apply(lambda x: bq_revenue_range(x['bq_revenue_mr']), axis=1)
             # else:
@@ -2792,6 +2792,10 @@ def merge_responses(response, search_universe, search_product, request, is_test)
     print(f"\nRemaining results:{remaining_df.shape}")
     final_df = pd.concat([best_match_df, remaining_df])
     # print("final df:", final_df.shape)
+    if 'bq_revenue_range' in final_df:
+        print(final_df['bq_revenue_range'])
+    else:
+        print('No bq_revenue_range')
     if len(final_df)>0:
         final_df.reset_index(inplace=True)
         final_df['bq_match_type_codes']= final_df['bq_match_type_codes'].astype(str)
@@ -2862,8 +2866,8 @@ def merge_responses(response, search_universe, search_product, request, is_test)
             final_df = final_df.drop_duplicates(subset=['bq_organization_id'])
             final_df = final_df[['bq_officer_id','bq_legal_entity_officer_id','bq_officer_full_name','bq_officer_position','bq_officer_person_or_company','bq_legal_entity_id','bq_legal_entity_name', 'bq_legal_entity_address1_line_1','bq_legal_entity_address1_city','bq_legal_entity_address1_state','bq_legal_entity_address1_zip5','bq_organization_id','bq_organization_name','bq_organization_address1_state_name','bq_organization_address1_state','bq_organization_naics_sector_name','bq_organization_active_indicator','bq_revenue_range','bq_employment_range', 'bq_match_types']]
 
-                
-    final_df = final_df.head(10)
+    print('API LIMIT::::::',LIMIT_MAPPING_DICT[search_product][search_universe])                
+    final_df = final_df.head(LIMIT_MAPPING_DICT[search_product][search_universe])
     if 'index' in final_df.columns:
         final_df.drop(['index'],axis=1, inplace=True)
     final_response = prep_response(final_df)
@@ -4030,6 +4034,7 @@ def search_executive_other(query, yql, type, filter, ranking, hits, limit, offse
     response = requests.get(search_endpoint, params=params).json()
     response = {"response":response,"status":200}
     return response
+
 
 FIELD_MATCHING_FUNCTIONS ={
 	'bq_organization_ticker':exact_match,

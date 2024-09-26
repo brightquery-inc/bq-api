@@ -256,7 +256,7 @@ def custom_link(query=None, yql=None, type='all', filter=None, ranking='bm25', h
 async def custom_link(request: Request, user_email: str = Depends(get_current_username)):
     log_stream_name = create_logger()
     logger.info(f'log_stream_name: {log_stream_name}')
-    search_product='BUSINESS_IDENTITY_API'
+    search_product='BQ_ID_API'
     search_universe='org'
     logger.info(f'user_email: {user_email}') 
     logger.info(f'Product:{search_product} search universe:{search_universe}') 
@@ -328,7 +328,7 @@ async def custom_link(request: Request, user_email: str = Depends(get_current_us
 async def custom_link(request: Request, user_email: str = Depends(get_current_username)):
     log_stream_name = create_logger()
     logger.info(f'log_stream_name: {log_stream_name}')
-    search_product='BUSINESS_IDENTITY_API'
+    search_product='BQ_ID_API'
     search_universe='le'
     logger.info(f'user_email: {user_email}')
     logger.info(f'Product:{search_product} search universe:{search_universe}') 
@@ -397,7 +397,7 @@ async def custom_link(request: Request, user_email: str = Depends(get_current_us
 async def custom_link(request: Request, user_email: str = Depends(get_current_username)):
     log_stream_name = create_logger()
     logger.info(f'log_stream_name: {log_stream_name}')
-    search_product='BUSINESS_IDENTITY_API'
+    search_product='BQ_ID_API'
     search_universe='officers'
     logger.info(f'user_email: {user_email}')
     logger.info(f'Product:{search_product} search universe:{search_universe}') 
@@ -711,6 +711,209 @@ async def custom_link(request: Request, user_email: str = Depends(get_current_us
                             response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, search_product, user_id, '', '', '', '', '')
                         elif matrix in ["Search_by_executive",'officer_details',"Search_by_officers"] :
                             response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, '', '', '', '', '')
+
+                        final_response[field] = response['response']
+                    else:
+                        logger.info({"response":"Invalid matrix used","status":400})
+                        response = {"response":"Invalid matrix used","status":400}
+                except Exception as e:
+                    return JSONResponse(content = {"error":str(e)}, status_code=400)
+
+                    response = except_error
+
+        response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
+        logger.info(f'final response: {response_}')
+
+    return JSONResponse(content =response_, status_code=response_['status'])
+
+@app.post("/bi/org")
+async def custom_link(request: Request, user_email: str = Depends(get_current_username)):
+    log_stream_name = create_logger()
+    logger.info(f'log_stream_name: {log_stream_name}')
+    search_product='BQ_BUSINESS_IDENTITY_API'
+    search_universe='org'
+    logger.info(f'user_email: {user_email}')
+    logger.info(f'Product:{search_product} search universe:{search_universe}')   
+    final_response={}
+    try:
+        request = await request.json()
+        payload_log = request
+        # print('request:', request)
+        logger.info(f'request:{request}')        
+    except Exception as e:
+        logger.info({"Error":"Invalid payload format"})
+        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)
+    
+    error = utils.validate_fields(request, search_product, search_universe)
+    if error:
+        logger.info(f'Error: {error}')
+
+    if error is not None:
+        response_ = {"response":error,"status":400}
+    else:    
+        request = utils.field_mapping(request, search_product, search_universe)
+        logger.info(f'request_new: {request}')
+        yql,field,user_id,tab,ult_selection,orderby,type,filter,ranking,hits,limit,offset,isAsc,user_level,side_bar,request,search_universe =utils.initialize_parameters(request)
+        logger.info(f'request keys: {request.keys()} request values: {request.values()} ult_selection {ult_selection}, orderby: {orderby} isAsc:{isAsc}')        
+
+        for field, query in request.items():
+            if query:
+                print('search_universe', search_universe, 'field', field)
+                matrix = FIELD_MATRIX_MAPPING[search_product][search_universe][field]
+                if ('exact' in field) & ('ticker' in field):
+                    field = field.split('_exact')[0]
+                    matrix='search_by_ticker_matches'
+                print('\nmatrix:', matrix, 'field:',field, 'query:',query,'\n')            
+                matrix_mapping = {
+                            "search_by_ticker_prefix":utils.search_ticker_prefix,
+                            "search_by_ticker_matches":utils.search_ticker_matches,
+                            "search_by_address":utils.search_by_address,
+                            "search":utils.search,
+                            "company_name":utils.company_name_updated,
+                            }
+                try:
+                    if matrix_mapping.get(matrix,None) != None:                    
+                        if matrix in ["search_by_ticker_matches","db_filters","Parent_Details","company_name","search", "search_by_bq_location_name"]:
+                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product)
+                        elif matrix in ["search_by_ticker_prefix"]:
+                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, "external", search_product, user_id )
+                        elif matrix in ["search_by_address","search_by_location_address"]:
+                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product,ult_selection)
+                        elif matrix in ['officer_details',"Search_by_officers"] :
+                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, search_product, user_id, '', '', '', '', '')
+
+                        # print(field,'response:',response)
+
+                        final_response[field] = response['response']
+                    else:
+                        logger.info({"response":"Invalid matrix used","status":400})
+                        response = {"response":"Invalid matrix used","status":400}
+                except Exception as e:
+                    return JSONResponse(content = {"error":str(e)}, status_code=400)
+
+        response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
+        logger.info(f'final response: {response_}')
+
+    return JSONResponse(content =response_, status_code=response_['status'])
+
+@app.post("/bi/le")
+async def custom_link(request: Request, user_email: str = Depends(get_current_username)):
+    log_stream_name = create_logger()
+    logger.info(f'log_stream_name: {log_stream_name}')
+    search_product='BQ_BUSINESS_IDENTITY_API'
+    search_universe='le'
+    logger.info(f'user_email: {user_email}')     
+    logger.info(f'Product:{search_product} search universe:{search_universe}')  
+    final_response={}
+    try:
+        request = await request.json()
+        payload_log = request
+        # print('request:', request)
+        logger.info(f'request:{request}')        
+    except Exception as e:
+        logger.info({"Error":"Invalid payload format"})
+        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)
+    
+    error = utils.validate_fields(request, search_product, search_universe)
+    if error:
+        logger.info(f'Error: {error}')
+
+    if error is not None:
+        response_ = {"response":error,"status":400}
+    else:    
+        request = utils.field_mapping(request, search_product, search_universe)
+        logger.info(f'request_new: {request}')
+        yql,field,user_id,tab,ult_selection,orderby,type,filter,ranking,hits,limit,offset,isAsc,user_level,side_bar,request,search_universe =utils.initialize_parameters(request)
+        logger.info(f'request keys: {request.keys()} request values: {request.values()} ult_selection {ult_selection}, orderby: {orderby} isAsc:{isAsc}')        
+
+        for field, query in request.items():
+            if query:
+                print('search_universe', search_universe, 'field', field)
+                matrix = FIELD_MATRIX_MAPPING[search_product][search_universe][field]
+                if ('exact' in field) & ('ticker' in field):
+                    field = field.split('_exact')[0]
+                    matrix='search_by_ticker_matches'
+                print('\nmatrix:', matrix, 'field:',field, 'query:',query,'\n')            
+                matrix_mapping = {
+                            "search_by_address":utils.search_by_address,
+                            "search":utils.search,
+                            "company_name":utils.company_name_updated,
+                            }
+                try:
+                    if matrix_mapping.get(matrix,None) != None:                    
+                        if matrix in ["search_by_ticker_matches","db_filters","Parent_Details","company_name","search", "search_by_bq_location_name"]:
+                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product)
+                        elif matrix in ["search_by_ticker_prefix"]:
+                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, "external", search_product, user_id )
+                        elif matrix in ["search_by_address","search_by_location_address"]:
+                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product,ult_selection)
+                        elif matrix in ['officer_details',"Search_by_officers"] :
+                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, search_product, user_id, '', '', '', '', '')
+
+                        final_response[field] = response['response']
+                    else:
+                        logger.info({"response":"Invalid matrix used","status":400})
+                        response = {"response":"Invalid matrix used","status":400}
+                except Exception as e:
+                    return JSONResponse(content = {"error":str(e)}, status_code=400)
+
+                    response = except_error
+
+        response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
+        logger.info(f'final response: {response_}')
+
+    return JSONResponse(content =response_, status_code=response_['status'])
+
+
+@app.post("/bi/location")
+async def custom_link(request: Request, user_email: str = Depends(get_current_username)):
+    log_stream_name = create_logger()
+    logger.info(f'log_stream_name: {log_stream_name}')
+    search_product='BQ_BUSINESS_IDENTITY_LOCATION_API'
+    search_universe='location'
+    logger.info(f'user_email: {user_email}')     
+    logger.info(f'Product:{search_product} search universe:{search_universe}')    
+    final_response={}
+    try:
+        request = await request.json()
+        payload_log = request
+        # print('request:', request)
+        logger.info(f'request:{request}')        
+    except Exception as e:
+        logger.info({"Error":"Invalid payload format"})
+        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)
+    
+    error = utils.validate_fields(request, search_product, search_universe)
+    if error:
+        logger.info(f'Error: {error}')
+
+    if error is not None:
+        response_ = {"response":error,"status":400}
+    else:    
+        request = utils.field_mapping(request, search_product, search_universe)
+        logger.info(f'request_new: {request}')
+        yql,field,user_id,tab,ult_selection,orderby,type,filter,ranking,hits,limit,offset,isAsc,user_level,side_bar,request,search_universe =utils.initialize_parameters(request)
+        logger.info(f'request keys: {request.keys()} request values: {request.values()} ult_selection {ult_selection}, orderby: {orderby} isAsc:{isAsc}')
+
+        for field, query in request.items():
+            if query:
+                print('search_universe', search_universe, 'field', field)
+                matrix = FIELD_MATRIX_MAPPING[search_product][search_universe][field]                
+                print('\nmatrix:', matrix, 'field:',field, 'query:',query,'\n')            
+                matrix_mapping = {
+                                "search_by_location_address":utils.search_by_location_address_updated,
+                                "search_by_bq_location_name":utils.search_by_bq_location_name
+                            }
+                try:
+                    if matrix_mapping.get(matrix,None) != None:                    
+                        if matrix in ["search_by_ticker_matches","db_filters","Parent_Details","company_name","search", "search_by_bq_location_name"]:
+                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product)
+                        elif matrix in ["search_by_ticker_prefix"]:
+                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, "external", search_product, user_id )
+                        elif matrix in ["search_by_address","search_by_location_address"]:
+                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product,ult_selection)
+                        elif matrix in ['officer_details',"Search_by_officers"] :
+                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, search_product, user_id, '', '', '', '', '')
 
                         final_response[field] = response['response']
                     else:
