@@ -1701,7 +1701,7 @@ def company_name_fuzzy(query=None,yql=None, type='all', filter=None, ranking='bm
         
     return response
 
-def company_name(query=None,yql=None, type='all', filter=None, ranking='bm25', hits=20, limit=50, offset=0, orderby=None, isAsc=False, field=None, user_id=None, request_origin=None, search_product='BUSINESS_IDENTITY_API'):    
+def company_name(query=None,yql=None, type='all', filter=None, ranking='bm25', hits=20, limit=50, offset=0, orderby=None, isAsc=False, field=None, user_id=None, request_origin=None, search_product='BQ_BUSINESS_IDENTITY_API'):    
     # ({maxEditDistance:1}fuzzy("{query}"))
     # VESPA_ENDPOINT = "http://localhost:8080"
     search_endpoint = f"{VESPA_ENDPOINT}/search/"
@@ -2702,7 +2702,7 @@ def append_response(response, search_universe, search_product):
         elif search_universe=='executives':
             response_df['bq_freq_count'] = response_df.groupby(['bq_executive_id'])['bq_match_types'].transform('nunique').astype(np.int64, errors='ignore')
         
-        if (search_product =='BQ_BUSINESS_IDENTITY_API') | (search_product =='BQ_ID_API'):
+        if (search_product =='BQ_BQ_BUSINESS_IDENTITY_API') | (search_product =='BQ_ID_API'):
             if 'bq_revenue_mr' in response_df:
                 response_df['bq_revenue_range']=response_df.apply(lambda x: bq_revenue_range(x['bq_revenue_mr']), axis=1)
             # else:
@@ -2803,7 +2803,7 @@ def merge_responses(response, search_universe, search_product, request, is_test)
         final_df['bq_freq_count'] = final_df.apply(lambda row: get_freq_count(row['bq_match_types']),axis=1)
         final_df['bq_match_types'] = final_df.apply(lambda row: add_match_type_suffix(row['bq_match_types']),axis=1)
         
-        if search_product =='BUSINESS_IDENTITY_API':
+        if search_product =='BQ_BUSINESS_IDENTITY_API':
             if ('bq_revenue_mr' in final_df) & ('bq_employment_mr' in final_df):
                 if search_universe != 'officers':
                     final_df.sort_values(['bq_freq_count','bq_match_type_codes','bq_revenue_mr','bq_employment_mr'], ascending=[False, True, False, False], inplace=True)
@@ -2846,8 +2846,7 @@ def merge_responses(response, search_universe, search_product, request, is_test)
                     if is_test:
                         final_df.drop(['bq_match_type_codes'],axis=1, inplace=True)
                     else:                
-                        final_df.drop(['bq_match_type_codes','bq_freq_count','bq_best_match'],axis=1, inplace=True)    
-        
+                        final_df.drop(['bq_match_type_codes','bq_freq_count','bq_best_match'],axis=1, inplace=True)            
         
         if search_universe=='org':                
             final_df = final_df[[(c) for c in RESPONSE_FIELDS[search_product] if c in final_df.columns]].drop_duplicates(subset=['bq_organization_id'])
@@ -2866,7 +2865,7 @@ def merge_responses(response, search_universe, search_product, request, is_test)
             final_df = final_df.drop_duplicates(subset=['bq_organization_id'])
             final_df = final_df[['bq_officer_id','bq_legal_entity_officer_id','bq_officer_full_name','bq_officer_position','bq_officer_person_or_company','bq_legal_entity_id','bq_legal_entity_name', 'bq_legal_entity_address1_line_1','bq_legal_entity_address1_city','bq_legal_entity_address1_state','bq_legal_entity_address1_zip5','bq_organization_id','bq_organization_name','bq_organization_address1_state_name','bq_organization_address1_state','bq_organization_naics_sector_name','bq_organization_active_indicator','bq_revenue_range','bq_employment_range', 'bq_match_types']]
 
-    print('API LIMIT::::::',LIMIT_MAPPING_DICT[search_product][search_universe])                
+    # print('API LIMIT::::::',LIMIT_MAPPING_DICT[search_product][search_universe])                
     final_df = final_df.head(LIMIT_MAPPING_DICT[search_product][search_universe])
     if 'index' in final_df.columns:
         final_df.drop(['index'],axis=1, inplace=True)
@@ -3355,22 +3354,32 @@ def match_results_with_search_params(request, row, search_product ,search_univer
     
 def update_match_types(match_types, match_type): 
     new_match_types=match_types
+    match_types_arr=[]
     # print('new_match_types', new_match_types)
-    match_types_arr = set(match_types.split(", "))
+    if match_types:
+        match_types_arr = list(set(match_types.split(", ")))
+
     # print('Array Match type:',match_types_arr,'match type:',match_type)
     if len(match_types_arr)>0:
-        if match_type not in match_types_arr:
+        if match_type not in match_types_arr:            
             new_match_types += ', '+match_type
+    else:
+        new_match_types =match_type
+
     return new_match_types
 
 def update_match_type_codes(match_type_codes : str, match_type_code : str): 
     new_match_type_codes=str(match_type_codes)
     # print('new_match_type_codes', new_match_type_codes)
-    match_type_codes_arr = set(match_type_codes.split(", "))
+    match_type_codes_arr=[]
+    if match_type_codes:
+        match_type_codes_arr = list(set(match_type_codes.split(", ")))
 #     print(match_types_arr)
     if len(match_type_codes_arr)>0:
         if match_type_code not in match_type_codes_arr:
             new_match_type_codes += ', '+match_type_code
+    else:
+        new_match_type_codes = match_type_code
     return new_match_type_codes
             
 def company_name_match(str1, str2):
@@ -3378,7 +3387,7 @@ def company_name_match(str1, str2):
     str2 = basename(str2.lower())
     score_ = fuzz.token_sort_ratio(str1,str2)
     # print('score:', score_)
-    if score_>70:
+    if score_>=70:
         return True
     return False
 
