@@ -12,10 +12,12 @@ from config import *
 from screenerutils import screener_sidebar
 import re
 from cleanco import basename
+from database_activities import *
+from cache_activities import *
 # from screenerutils import screener_sidebar, fields_to_convert_map, range_convert
-
+pd.options.mode.chained_assignment = None
 logs = logging.basicConfig(filename='terminal2_¸and_search2.log', encoding='utf-8', level=logging.INFO)
-
+db = DatabaseManager()
 logging.basicConfig(level=logging.INFO, filename='terminal2_and_search2.log')
 logger = logging.getLogger("my_logger")
 logger.setLevel(logging.INFO)
@@ -2677,20 +2679,18 @@ def response_to_df(response, field, search_universe, search_product):
         main_df['bq_match_type_codes'] = str(FIELD_BQ_MATCH_TYPE_CODES_MAPPING[search_product][search_universe][field])
     return main_df
 
-def append_response(response, search_universe, search_product):
+def append_response(response, search_universe, search_product):    
     response_df=pd.DataFrame()
     if len(response)>0:
-        for c in response:
-            response_ = response_to_df(response[c], c, search_universe, search_product)
-            print(f'search by {c} {response_.shape}')
-            response_df=response_df._append(response_,ignore_index=True)
-            if search_universe =='officers':
-                response_df.drop(['sddocname','documentid'], axis=1, inplace=True)
+        for re in response:
+            for c in re.keys():                  
+                response_ = response_to_df(re[c], c, search_universe, search_product)
+                response_df=response_df._append(response_,ignore_index=True)
+                if search_universe =='officers':
+                    response_df.drop(['sddocname','documentid'], axis=1, inplace=True)
     
-    print("Response DF::::::",response_df.shape)
     if len(response_df)>0:        
         response_df['sort'] = response_df.reset_index().index    
-        # print(response_df)    
         if search_universe=='org':        
             response_df['bq_freq_count'] = response_df.groupby(['bq_organization_id'])['bq_match_types'].transform('nunique').astype(np.int64, errors='ignore')
         elif search_universe=='le':
@@ -2784,12 +2784,12 @@ def merge_responses(response, search_universe, search_product, request, is_test)
     remaining_df = pd.DataFrame()
     final_df = pd.DataFrame()
     response_df = append_response(response, search_universe, search_product)
-    print('response_df:::', response_df.shape)
+    # print('response_df:::', response_df.shape)
     # response_df.to_csv("/users/amitpawar/Downloads/api_result.csv", index=False)
     best_match_df = get_best_match(response_df)
-    print('best_match_df:::::',best_match_df.shape)
+    # print('best_match_df:::::',best_match_df.shape)
     remaining_df = get_remaining_matches(response_df)
-    print(f"\nRemaining results:{remaining_df.shape}")
+    # print(f"\nRemaining results:{remaining_df.shape}")
     final_df = pd.concat([best_match_df, remaining_df])
     # print("final df:", final_df.shape)
     if 'bq_revenue_range' in final_df:
@@ -2874,29 +2874,26 @@ def merge_responses(response, search_universe, search_product, request, is_test)
     # print('Columns:',final_df.columns)
     return final_response
 
-def initialize_parameters(request):
+def initialize_parameters(request, search_universe):
     yql=field=user_id=tab=''
     orderby='bq_revenue_mr'
     type='all'
     filter=None 
     ranking='bm25'
-    hits=100
-    limit=50
+    hits=10
+    limit=10
     offset=0
     isAsc=False    
     user_level = 1
     side_bar=False
     addressflag=companynameflag=0
     query=address=company_name=""
-    search_universe="org"
     ult_selection='orgAddress'
     
-    for field, values in request.items():        
-        print('field:',field, 'values:',values)
-        if 'search_universe' in request:
-            search_universe= request['search_universe'] if request['search_universe'] !='' else 'org'
-            if search_universe!='org':
-                ult_selection=''
+    for field, values in request.items():                
+        if search_universe!='org':
+            ult_selection=''
+
         if field in ['bq_organization_name','bq_organization_legal_name','bq_location_name']:
             company_name = values
             companynameflag=1
@@ -2969,7 +2966,7 @@ def validate_search_universe(search_universe, search_product):
 
 def validate_fields(request, search_product, search_universe):
     error_fields=[]
-    print('search_universe:::::', request)
+    # print('search_universe:::::', request)
     if(validate_search_universe(search_universe, search_product)):
         return f"Invalid search universe '{search_universe}'"
     else:
@@ -2979,7 +2976,7 @@ def validate_fields(request, search_product, search_universe):
 
     # if search_product=='INSURANCE_API':
     if search_universe != 'executives':
-        print('request', request.keys())
+        # print('request', request.keys())
         if 'website' not in request.keys():                        
             if 'email' in request:
                 if checkEmail(request['email']):
@@ -2993,7 +2990,7 @@ def validate_fields(request, search_product, search_universe):
         else:
             if 'email' in request:
                 del request['email']
-            print('request', request.keys())
+            # print('request', request.keys())
 
     if search_universe == 'location':
         if ('city' in request.keys()) | ('state' in request.keys()) | ('county' in request.keys()):
@@ -3587,28 +3584,29 @@ def add_yql_location_name(query, field):
 
 def search_by_bq_location_name(query=None,yql=None, type='all', filter=None, ranking='bm25', hits=20, limit=50, offset=0, orderby=None, isAsc=False, field=None, user_id=None, request_origin=None, search_product=None):
     search_endpoint = f"{VESPA_ENDPOINT}/search/"
-    query = query.lower()    
-    yql = f"SELECT  {','.join(QUERY_FIELDS[search_product])} FROM bq_location_new where "
+    query = query.lower()
+    
+    # if request_origin == "terminal":
+    #     yql = terminal_yql
+    #     yql = yql.replace(" from terminal_screener where",", ")
+    #     yql = yql + "bq_legal_entity_address1_line_1, bq_legal_entity_address1_line_2, bq_legal_entity_address1_city, bq_legal_entity_address1_state, bq_legal_entity_address1_zip5 from terminal_screener where"
+                
+    # else:
+    #     yql = search_yql
+    yql = "select * from bq_location_new where"
     if query:
         if field:
-            if field == "bq_location_name":
-                if yql.lower().rstrip().endswith('and'):                
-                    # yql = f'{yql} and (({field} matches "{query}") or (bq_location_id contains "{query}") or ({field} contains "{query}")) and'
-                    yql = f'{yql} and {add_yql_location_name(query, field)} and'
-                elif yql.lower().rstrip().endswith('where'):                    
-                        yql = f'{yql} {add_yql_location_name(query, field)}'
-                else:
-                    yql = f'{yql} and {add_yql_location_name(query, field)} and'            
-            elif field == 'bq_location_website':
-                query = query.replace('www.','')
-                query = query.replace('https://','')
-                query = query.replace('http://','')
-                if yql.lower().rstrip().endswith('and'):
-                    yql = f"{yql} and (({field} contains '{query}') or ( {field} matches '{query}'))"
-                elif yql.lower().rstrip().endswith('where'):
-                    yql = f"{yql} (({field} contains '{query}') or ( {field} matches '{query}'))"
-                else:
-                    yql = f"{yql} and (({field} contains '{query}') or ( {field} matches '{query}'))"
+            if yql.lower().rstrip().endswith('and'):
+                if field == "bq_location_name":
+                    yql = f'{yql} and (({field} matches "{query}") or (bq_location_id contains "{query}") or ({field} contains "{query}")) and'
+
+            elif yql.lower().rstrip().endswith('where'):
+                if field == "bq_location_name":
+                    yql = f'{yql} (({field} matches "{query}") or (bq_location_id contains "{query}") or ({field} contains "{query}")) and'
+
+            else:
+                if field == "bq_location_name":
+                    yql = f'{yql} and (({field} contains "{query}") or (bq_location_id contains "{query}") or ({field} contains "{query}")) and'
 
             query = query.lower()
             if 'and' in query:                
@@ -3727,6 +3725,51 @@ def search_by_bq_location_name(query=None,yql=None, type='all', filter=None, ran
     response = {"response":response,"status":200}
     return response
 
+def locationsearch(data):    
+    search_endpoint = f"{MARCH_VESPA_ENDPOINT}/search/"
+    data = data['data']
+ 
+    # data = await request.json()
+    bq_id = data['bq_id']
+    offset = data['offset']
+    # limit = data['limit']
+    filter = data['filter']
+    hits = data['hits']
+   
+    yql = f'SELECT * FROM bq_location_new WHERE bq_organization_id contains "{bq_id}"'
+    # yql = f'SELECT bq_organization_id, bq_location_name, bq_location_type, bq_location_class, bq_location_address_rdi, bq_location_address_line_1, bq_location_address_line_2, bq_location_address_city, bq_location_address_state, bq_location_address_zip5, bq_location_address_country_name FROM bq_location_new WHERE bq_organization_id contains "{bq_id}"'
+    # yql = f"SELECT bq_organization_id, bq_location_name, bq_location_type, bq_location_address_line_1, bq_location_address_city, bq_location_address_state_name, bq_location_address_zip5, bq_location_address_country_name, bq_location_address_state_name FROM bq_location_new WHERE bq_organization_id contains '{bq_id}'"
+   
+    if len(filter) == 0:
+        yql = yql + ";"
+    else:
+        yql =f"{yql} and"
+        for key, val in filter.items():
+            if len(val) >= 1:
+                filter_yql = ''
+                for v in val:
+                    filter_yql = filter_yql + f'{key} contains "{v}" OR '
+                filter_yql = remove_and_from_end(filter_yql)
+                filter_yql = f"({filter_yql})"
+                yql = f'{yql} {filter_yql} and'
+            elif len(val) == 0:
+                pass
+        yql = f"{remove_and_from_end(yql)}"
+    params = {
+        'yql': yql,
+        'ranking': 'bm25',
+        'type': 'all',
+        'hits': hits,
+        'offset': offset,
+        'limit': 100,
+        "format": "json"
+    }
+  
+    response = requests.get(search_endpoint, params=params).json()
+ 
+    response = {"response":response,"status":200}
+    return response
+
 def create_yql_advanced_executive( query, yql, field, filter, orderby, isAsc, yql_flag='contains'):
 
     if query:
@@ -3823,14 +3866,11 @@ def create_yql_advanced_executive( query, yql, field, filter, orderby, isAsc, yq
     # print('...........',yql)
     return yql
 
-def Search_by_executive_updated(query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, bq_organization_ticker, bq_organization_lei, bq_legal_entity_parent_status, bq_legal_entity_id, bq_organization_id):
+def Search_by_executive_updated(query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, search_product, user_id, bq_organization_ticker, bq_organization_lei, bq_legal_entity_parent_status, bq_legal_entity_id, bq_organization_id):
     search_endpoint = f'{VESPA_ENDPOINT}/search/'
-    yql = f"select * from bq_executives where"
-    
+    yql = f"select * from bq_executives where"    
     yql_from_func_contains = create_yql_advanced_executive(query, yql, field, filter, orderby, isAsc, yql_flag='contains')
-    
-   
-    print("yql_from_func_contains....... ", yql_from_func_contains)
+    # print("yql_from_func_contains....... ", yql_from_func_contains)
     params = {
         'yql': yql_from_func_contains,
         'offset': offset,
@@ -3841,13 +3881,13 @@ def Search_by_executive_updated(query, yql, type, filter, ranking, hits, limit, 
         # "timeout":20,
         "format": "json",
     }
-    print('params::',params)
+    # print('params::',params)
     response = requests.get(search_endpoint, params=params).json()
-    print('response:::', response)
+    # print('response:::', response)
     if response['root']['fields']['totalCount'] == 0:
         
         yql_from_func_fuzzy = create_yql_advanced_executive(query, yql, field, filter, orderby, isAsc, yql_flag='fuzzy')
-        print("yql_from_func_fuzzy.....", yql_from_func_fuzzy)
+        # print("yql_from_func_fuzzy.....", yql_from_func_fuzzy)
 
 
         params = {
@@ -4043,6 +4083,68 @@ def search_executive_other(query, yql, type, filter, ranking, hits, limit, offse
     response = requests.get(search_endpoint, params=params).json()
     response = {"response":response,"status":200}
     return response
+
+def log_to_cloudwatch(message, type):
+    if type=='info':
+        logger.info(message)
+    else:
+        logger.error(message)
+
+def process_request(req):
+    cache = TwoLevelCache(db.redis)
+    final_response={}
+    request=search_universe=search_product=""
+    for k, v in req.items():
+        if 'su' in k:
+            search_universe=v
+        elif 'sp' in k:
+            search_product=v
+        else:
+            request={k:v}
+    # print('search_product:',search_product,'search_universe:',search_universe)
+    yql,field,user_id,tab,ult_selection,orderby,type,filter,ranking,hits,limit,offset,isAsc,user_level,side_bar,request,search_universe =initialize_parameters(request, search_universe)
+    # print(req)
+    # print(request)
+    # print('search_product:',search_product,'search_universe:',search_universe)
+    for field, query in request.items():
+        if query:                        
+            matrix = cache.get_matrix_mapping(search_product,search_universe)[field]
+            # print('matrix::', matrix)
+            if ('exact' in field) & ('ticker' in field):
+                field = field.split('_exact')[0]
+                matrix='search_by_ticker_matches'
+            matrix_mapping = {
+                        "search_by_ticker_prefix":search_ticker_prefix,
+                        "search_by_ticker_matches":search_ticker_matches,
+                        "search_by_address":search_by_address,
+                        "search":search,
+                        "company_name":company_name_updated,
+                         "Search_by_officers": officer_details,
+                        "officer_details":officer_inside_company_details,
+                        "search_by_location_address":search_by_location_address_updated,
+                        "search_by_bq_location_name":search_by_bq_location_name,
+                        "Search_by_executive": Search_by_executive_updated,
+                        "Search_by_executive_other": search_executive_other
+                        }
+            try:                
+                if matrix_mapping.get(matrix,None) != None:                    
+                    if matrix in ["search_by_ticker_matches","db_filters","Parent_Details","company_name","search", "search_by_bq_location_name","Search_by_executive_other"]:
+                        response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product)
+                    elif matrix in ["search_by_ticker_prefix"]:
+                        response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, "external", search_product, user_id )
+                    elif matrix in ["search_by_address","search_by_location_address"]:
+                        response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product,ult_selection)
+                    elif matrix in ['officer_details',"Search_by_officers","Search_by_executive"] :
+                        response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, search_product, user_id, '', '', '', '', '')
+                
+                    
+                    final_response[field] = response['response']
+                else:                        
+                    # background_tasks.add_task(log_to_cloudwatch,{"response":"Invalid matrix used","status":400} , 'error')
+                    final_response = {"response":"Invalid matrix used","status":400}
+            except Exception as e:
+                return JSONResponse(content = {"error":str(e)}, status_code=400)
+    return final_response        
 
 
 FIELD_MATCHING_FUNCTIONS ={

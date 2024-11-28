@@ -4,7 +4,9 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.security import OAuth2AuthorizationCodeBearer, OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse  
+from fastapi import BackgroundTasks
 from passlib.context import CryptContext 
+
 import os, psutil, jwt, json, re
 from typing import Optional, Union
 from pydantic import BaseModel
@@ -15,6 +17,7 @@ import datetime
 from datetime import timedelta
 import pandas as pd
 import utils, search2utils, screenerutils
+from utils import log_to_cloudwatch, process_request
 from fastapi.responses import FileResponse
 import logging
 from time import strftime
@@ -24,6 +27,9 @@ import logging
 from config import *
 from time import gmtime, strftime
 from random import randint
+from multiprocess import Pool
+from database_activities import *
+from cache_activities import *
 
 
 def random_with_N_digits(n):
@@ -36,6 +42,7 @@ def create_log_stream_name():
 
 app = FastAPI()
 security = HTTPBasic()
+db = DatabaseManager()
 logging.basicConfig(level=logging.INFO, filename='terminal2_and_search2.log')
 logger = logging.getLogger("my_logger")
 logger.setLevel(logging.INFO)
@@ -46,7 +53,6 @@ logger.addHandler(handler)
 
 def create_logger():
     stream_name = create_log_stream_name()
-
     handler = cloudwatch.CloudwatchHandler(
     log_group = config.LOG_GROUP, 
     log_stream = stream_name,
@@ -198,737 +204,655 @@ def remove_and_from_end(input_string):
 async def index():
    return {"message": "Hello World test"}
 
-@app.get("/api/custom_link")
-def custom_link(query=None, yql=None, type='all', filter=None, ranking='bm25', hits=100, limit=50, offset=0, orderby=None, isAsc=False, field=None, user_id=None, bq_organization_ticker=None, bq_organization_lei = None, bq_legal_entity_parent_status = None, bq_legal_entity_id = None, bq_organization_id = None, matrix=None, tab=None, ult_selection=None, user_level = 1, side_bar=False):
-    matrix_mapping = {"Search_by_officers": utils.officer_details,
-                        "search_by_ticker_prefix":utils.search_ticker_prefix,
-                        "search_by_ticker_matches":utils.search_ticker_matches,
-                        "search_by_address":utils.search_by_address,
-                        "db_filters":utils.unique_values,
-                        "Parent_Details":utils.parent_entity_details,
-                        "sidebar":utils.side_bar,
-                        "Org_Revenue_Employment":utils.get_organization_history,
-                        "search":utils.search,
-                        "get_financial_data":utils.get_financial_data,
-                        "company_name":utils.company_name,
-                        "officer_details":utils.officer_inside_company_details,
-                        "screener_universal_search":screenerutils.screener_search,
-                        "screener_unique_values":screenerutils.get_unique_values,
-                        "stats":utils.stats,
-                        "search_by_location_address":utils.search_by_location_address,
-                        "search_by_bq_location_name":utils.search_by_bq_location_name,
-                        }
-    
-    try:
-        if matrix_mapping.get(matrix,None) != None:
-            
-            if matrix in ['officer_details',"Search_by_officers"] :
-                response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, bq_organization_ticker, bq_organization_lei, bq_legal_entity_parent_status, bq_legal_entity_id, bq_organization_id)
-            elif matrix in ["get_financial_data","Org_Revenue_Employment"]:
-                response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, )
-            elif matrix == "sidebar":
-                response = matrix_mapping[matrix](tab, query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, ult_selection)
-            elif matrix in ["search_by_address","search_by_location_address"]:
-                response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "terminal",ult_selection)
-            elif matrix == "screener_universal_search":
-                response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "terminal",side_bar)
-            elif matrix == "screener_unique_values":
-                response = matrix_mapping[matrix](user_level)
-            elif matrix == "stats":
-                response = matrix_mapping[matrix](data)
-            elif matrix in ["search_by_ticker_matches","search_by_address","db_filters","Parent_Details","company_name","search", "search_by_bq_location_name"]:
-                response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "terminal")
-            elif matrix in ["search_by_ticker_prefix"]:
-                response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, True, field, user_id, "terminal")
-        else:
-            response = {"response":"Invalid matrix used","status":400}
-    except Exception as e:
-        return JSONResponse(content = {"error":str(e)}, status_code=400)
-
-        response = except_error
-
-    return JSONResponse(content = response['response'], status_code=response['status'])
-    # except Exception as e:
-    #     return JSONResponse(content = {"error":"An error occured at our end","details":str(e)}, status_code=400)
-
-
 @app.post("/api/org")
-async def custom_link(request: Request, user_email: str = Depends(get_current_username)):
+async def custom_link(request: Request, background_tasks: BackgroundTasks, user_email: str = Depends(get_current_username)):
     log_stream_name = create_logger()
-    logger.info(f'log_stream_name: {log_stream_name}')
+    cache = TwoLevelCache(db.redis)    
+    background_tasks.add_task(log_to_cloudwatch, f'log_stream_name: {log_stream_name}', 'info')        
     search_product='BQ_ID_API'
     search_universe='org'
-    logger.info(f'user_email: {user_email}') 
-    logger.info(f'Product:{search_product} search universe:{search_universe}') 
+    background_tasks.add_task(log_to_cloudwatch, f'user_email: {user_email}', 'info')    
+    background_tasks.add_task(log_to_cloudwatch, f'Product:{search_product} search universe:{search_universe}', 'info')            
+    
     final_response={}
     payload_log={}
     try:
         request = await request.json()
         payload_log = request
-        logger.info(f'request:{request}')        
-    except Exception as e:
-        logger.info({"Error":"Invalid payload format"})
-        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)
+    except Exception as e:        
+        background_tasks.add_task(logger.error({"Error":"Invalid payload format"}))
+        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)    
     
     error = utils.validate_fields(request, search_product, search_universe)
     if error:
-        logger.info(f'Error: {error}')
-
-    if error is not None:
-        response_ = {"response":error,"status":400}
-    else:    
+        background_tasks.add_task(log_to_cloudwatch,f'Error: {error}' , 'error')        
+        
+    if error is None:
         request = utils.field_mapping(request, search_product, search_universe)
-        logger.info(f'request_new: {request}')
-        yql,field,user_id,tab,ult_selection,orderby,type,filter,ranking,hits,limit,offset,isAsc,user_level,side_bar,request,search_universe =utils.initialize_parameters(request)
-        logger.info(f'request keys: {request.keys()} request values: {request.values()} ult_selection {ult_selection}, orderby: {orderby} isAsc:{isAsc}')        
+        cached_response = await cache.get_cached_response(
+            f'{search_product}/{search_universe}',
+            request
+        )
+        if cached_response:
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {cached_response}' , 'info')
+            return JSONResponse(content =cached_response, status_code=cached_response['status'])
+        else:
+            background_tasks.add_task(log_to_cloudwatch, f'request::{request}', 'info')    
+            req_query    =[]
+            for field, query in request.items():
+                if field !='search_universe':
+                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_query.append(req_dict)        
+            background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
-        for field, query in request.items():
-            if query:
-                print('search_universe', search_universe, 'field', field)
-                matrix = FIELD_MATRIX_MAPPING[search_product][search_universe][field]
-                if ('exact' in field) & ('ticker' in field):
-                    field = field.split('_exact')[0]
-                    matrix='search_by_ticker_matches'
-                print('\nmatrix:', matrix, 'field:',field, 'query:',query,'\n')            
-                matrix_mapping = {
-                            "search_by_ticker_prefix":utils.search_ticker_prefix,
-                            "search_by_ticker_matches":utils.search_ticker_matches,
-                            "search_by_address":utils.search_by_address,
-                            "search":utils.search,
-                            "company_name":utils.company_name_updated,
-                            # "search_by_location_address":utils.search_by_location_address,
-                            # "search_by_bq_location_name":utils.search_by_bq_location_name,
-                            "Search_by_officers": utils.officer_details,
-                            "officer_details":utils.officer_inside_company_details,
-                            }
-                try:
-                    if matrix_mapping.get(matrix,None) != None:                    
-                        if matrix in ["search_by_ticker_matches","db_filters","Parent_Details","company_name","search", "search_by_bq_location_name"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product)
-                        elif matrix in ["search_by_ticker_prefix"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, "external", search_product, user_id )
-                        elif matrix in ["search_by_address","search_by_location_address"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product,ult_selection)
-                        elif matrix in ['officer_details',"Search_by_officers"] :
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, search_product, user_id, '', '', '', '', '')
-
-                        final_response[field] = response['response']
-                    else:
-                        logger.info({"response":"Invalid matrix used","status":400})
-                        response = {"response":"Invalid matrix used","status":400}
-                except Exception as e:
-                    return JSONResponse(content = {"error":str(e)}, status_code=400)
-
-        response_ =  utils.merge_responses(final_response, search_universe,search_product,payload_log, is_test=False)
-        logger.info(f'final response: {response_}')
+            with Pool() as pool:  # Adjust number of processes as needed
+                final_response =pool.map(process_request, req_query)
+                pool.close()
+                pool.join()        
+            response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
+            await cache.set_cached_response(
+                f'{search_product}/{search_universe}',
+                request,
+                response_,
+                expire=CACHE_LIMIT  # 5 minutes
+            )
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'info')        
+    else:
+        response_ = {"response":error,"status":400}
+        background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'error')        
 
     return JSONResponse(content =response_, status_code=response_['status'])
 
 @app.post("/api/le")
-async def custom_link(request: Request, user_email: str = Depends(get_current_username)):
+async def custom_link(request: Request, background_tasks: BackgroundTasks, user_email: str = Depends(get_current_username)):
     log_stream_name = create_logger()
-    logger.info(f'log_stream_name: {log_stream_name}')
+    cache = TwoLevelCache(db.redis)    
+    background_tasks.add_task(log_to_cloudwatch, f'log_stream_name: {log_stream_name}', 'info')        
     search_product='BQ_ID_API'
     search_universe='le'
-    logger.info(f'user_email: {user_email}')
-    logger.info(f'Product:{search_product} search universe:{search_universe}') 
+    background_tasks.add_task(log_to_cloudwatch, f'user_email: {user_email}', 'info')    
+    background_tasks.add_task(log_to_cloudwatch, f'Product:{search_product} search universe:{search_universe}', 'info')            
+    
     final_response={}
+    payload_log={}
     try:
         request = await request.json()
         payload_log = request
-        logger.info(f'request:{request}')        
-    except Exception as e:
-        logger.info({"Error":"Invalid payload format"})
-        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)
+    except Exception as e:        
+        background_tasks.add_task(logger.error({"Error":"Invalid payload format"}))
+        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)    
     
     error = utils.validate_fields(request, search_product, search_universe)
     if error:
-        logger.info(f'Error: {error}')
-
-    if error is not None:
-        response_ = {"response":error,"status":400}
-    else:    
+        background_tasks.add_task(log_to_cloudwatch,f'Error: {error}' , 'error')        
+        
+    if error is None:
         request = utils.field_mapping(request, search_product, search_universe)
-        logger.info(f'request_new: {request}')
-        yql,field,user_id,tab,ult_selection,orderby,type,filter,ranking,hits,limit,offset,isAsc,user_level,side_bar,request,search_universe =utils.initialize_parameters(request)
-        logger.info(f'request keys: {request.keys()} request values: {request.values()} ult_selection {ult_selection}, orderby: {orderby} isAsc:{isAsc}')        
+        cached_response = await cache.get_cached_response(
+            f'{search_product}/{search_universe}',
+            request
+        )
+        if cached_response:
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {cached_response}' , 'info')
+            return JSONResponse(content =cached_response, status_code=cached_response['status'])
+        else:
+            background_tasks.add_task(log_to_cloudwatch, f'request::{request}', 'info')    
+            req_query    =[]
+            for field, query in request.items():
+                if field !='search_universe':
+                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_query.append(req_dict)        
+            background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
-        for field, query in request.items():
-            if query:
-                print('search_universe', search_universe, 'field', field)
-                matrix = FIELD_MATRIX_MAPPING[search_product][search_universe][field]
-                if ('exact' in field) & ('ticker' in field):
-                    field = field.split('_exact')[0]
-                    matrix='search_by_ticker_matches'
-                print('\nmatrix:', matrix, 'field:',field, 'query:',query,'\n')            
-                matrix_mapping = {
-                            "search_by_ticker_prefix":utils.search_ticker_prefix,
-                            "search_by_ticker_matches":utils.search_ticker_matches,
-                            "search_by_address":utils.search_by_address,
-                            "search":utils.search,
-                            "company_name":utils.company_name_updated,
-                            "Search_by_officers": utils.officer_details,
-                            "officer_details":utils.officer_inside_company_details,
-                            }
-                try:
-                    if matrix_mapping.get(matrix,None) != None:                    
-                        if matrix in ["search_by_ticker_matches","db_filters","Parent_Details","company_name","search", "search_by_bq_location_name"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product)
-                        elif matrix in ["search_by_ticker_prefix"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, "external", search_product, user_id )
-                        elif matrix in ["search_by_address","search_by_location_address"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product,ult_selection)
-                        elif matrix in ['officer_details',"Search_by_officers"] :
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, search_product, user_id, '', '', '', '', '')
-
-                        final_response[field] = response['response']
-                    else:
-                        logger.info({"response":"Invalid matrix used","status":400})
-                        response = {"response":"Invalid matrix used","status":400}
-                except Exception as e:
-                    return JSONResponse(content = {"error":str(e)}, status_code=400)
-
-        response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log, is_test=False)
-        logger.info(f'final response: {response_}')
+            with Pool() as pool:  # Adjust number of processes as needed
+                final_response =pool.map(process_request, req_query)
+                pool.close()
+                pool.join()        
+            response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
+            await cache.set_cached_response(
+                f'{search_product}/{search_universe}',
+                request,
+                response_,
+                expire=CACHE_LIMIT  # 5 minutes
+            )
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'info')        
+    else:
+        response_ = {"response":error,"status":400}
+        background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'error')        
 
     return JSONResponse(content =response_, status_code=response_['status'])
 
 @app.post("/api/officers")
-async def custom_link(request: Request, user_email: str = Depends(get_current_username)):
+async def custom_link(request: Request, background_tasks: BackgroundTasks, user_email: str = Depends(get_current_username)):
     log_stream_name = create_logger()
-    logger.info(f'log_stream_name: {log_stream_name}')
+    cache = TwoLevelCache(db.redis)    
+    background_tasks.add_task(log_to_cloudwatch, f'log_stream_name: {log_stream_name}', 'info')        
     search_product='BQ_ID_API'
     search_universe='officers'
-    logger.info(f'user_email: {user_email}')
-    logger.info(f'Product:{search_product} search universe:{search_universe}') 
+    background_tasks.add_task(log_to_cloudwatch, f'user_email: {user_email}', 'info')    
+    background_tasks.add_task(log_to_cloudwatch, f'Product:{search_product} search universe:{search_universe}', 'info')            
+    
     final_response={}
+    payload_log={}
     try:
         request = await request.json()
         payload_log = request
-        # print('request:', request)
-        logger.info(f'request:{request}')        
-    except Exception as e:
-        logger.info({"Error":"Invalid payload format"})
-        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)
+    except Exception as e:        
+        background_tasks.add_task(logger.error({"Error":"Invalid payload format"}))
+        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)    
     
     error = utils.validate_fields(request, search_product, search_universe)
     if error:
-        logger.info(f'Error: {error}')
+        background_tasks.add_task(log_to_cloudwatch,f'Error: {error}' , 'error')        
+        
+    if error is None:
+        request = utils.field_mapping(request, search_product, search_universe)
+        cached_response = await cache.get_cached_response(
+            f'{search_product}/{search_universe}',
+            request
+        )
+        if cached_response:
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {cached_response}' , 'info')
+            return JSONResponse(content =cached_response, status_code=cached_response['status'])
+        else:
+            background_tasks.add_task(log_to_cloudwatch, f'request::{request}', 'info')    
+            req_query    =[]
+            for field, query in request.items():
+                if field !='search_universe':
+                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_query.append(req_dict)        
+            background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
-    if error is not None:
+            with Pool() as pool:  # Adjust number of processes as needed
+                final_response =pool.map(process_request, req_query)
+                pool.close()
+                pool.join()        
+            response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
+            await cache.set_cached_response(
+                f'{search_product}/{search_universe}',
+                request,
+                response_,
+                expire=CACHE_LIMIT  # 5 minutes
+            )
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'info')        
+    else:
         response_ = {"response":error,"status":400}
-    else:    
-        request = utils.field_mapping(request, search_product,search_universe)
-        logger.info(f'request_new: {request}')
-        yql,field,user_id,tab,ult_selection,orderby,type,filter,ranking,hits,limit,offset,isAsc,user_level,side_bar,request,search_universe =utils.initialize_parameters(request)
-        logger.info(f'request keys: {request.keys()} request values: {request.values()} ult_selection {ult_selection}, orderby: {orderby} isAsc:{isAsc}')        
-
-        for field, query in request.items():
-            if query:
-                print('search_universe', search_universe, 'field', field)
-                matrix = FIELD_MATRIX_MAPPING[search_product][search_universe][field]
-                if ('exact' in field) & ('ticker' in field):
-                    field = field.split('_exact')[0]
-                    matrix='search_by_ticker_matches'
-                print('\nmatrix:', matrix, 'field:',field, 'query:',query,'\n')            
-                matrix_mapping = {
-                            "Search_by_officers": utils.officer_details,
-                            "officer_details":utils.officer_inside_company_details,
-                            }
-                try:
-                    if matrix_mapping.get(matrix,None) != None:                    
-                        if matrix in ["search_by_ticker_matches","db_filters","Parent_Details","company_name","search", "search_by_bq_location_name"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product)
-                        elif matrix in ["search_by_ticker_prefix"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, "external", search_product, user_id )
-                        elif matrix in ["search_by_address","search_by_location_address"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product,ult_selection)
-                        elif matrix in ['officer_details',"Search_by_officers"] :
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, search_product, user_id, '', '', '', '', '')
-
-                        final_response[field] = response['response']
-                    else:
-                        logger.info({"response":"Invalid matrix used","status":400})
-                        response = {"response":"Invalid matrix used","status":400}
-                except Exception as e:
-                    return JSONResponse(content = {"error":str(e)}, status_code=400)
-
-        response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
-        logger.info(f'final response: {response_}')
+        background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'error')        
 
     return JSONResponse(content =response_, status_code=response_['status'])
 
 @app.post("/append/org")
-async def custom_link(request: Request, user_email: str = Depends(get_current_username)):
+async def custom_link(request: Request, background_tasks: BackgroundTasks, user_email: str = Depends(get_current_username)):
     log_stream_name = create_logger()
-    logger.info(f'log_stream_name: {log_stream_name}')
+    cache = TwoLevelCache(db.redis)    
+    background_tasks.add_task(log_to_cloudwatch, f'log_stream_name: {log_stream_name}', 'info')        
     search_product='BQ_APPEND_API'
     search_universe='org'
-    logger.info(f'user_email: {user_email}')
-    logger.info(f'Product:{search_product} search universe:{search_universe}')   
+    background_tasks.add_task(log_to_cloudwatch, f'user_email: {user_email}', 'info')    
+    background_tasks.add_task(log_to_cloudwatch, f'Product:{search_product} search universe:{search_universe}', 'info')            
+    
+    final_response={}
+    payload_log={}
+    try:
+        request = await request.json()
+        payload_log = request
+    except Exception as e:        
+        background_tasks.add_task(logger.error({"Error":"Invalid payload format"}))
+        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)    
+    
+    error = utils.validate_fields(request, search_product, search_universe)
+    if error:
+        background_tasks.add_task(log_to_cloudwatch,f'Error: {error}' , 'error')        
+        
+    if error is None:
+        request = utils.field_mapping(request, search_product, search_universe)
+        cached_response = await cache.get_cached_response(
+            f'{search_product}/{search_universe}',
+            request
+        )
+        if cached_response:
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {cached_response}' , 'info')        
+            return JSONResponse(content =cached_response, status_code=cached_response['status'])
+        else:
+            background_tasks.add_task(log_to_cloudwatch, f'request::{request}', 'info')    
+            req_query    =[]
+            for field, query in request.items():
+                if field !='search_universe':
+                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_query.append(req_dict)        
+            background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
+
+            with Pool() as pool:  # Adjust number of processes as needed
+                final_response =pool.map(process_request, req_query)
+                pool.close()
+                pool.join()        
+            response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
+            await cache.set_cached_response(
+                f'{search_product}/{search_universe}',
+                request,
+                response_,
+                expire=CACHE_LIMIT  # 5 minutes
+            )
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'info')        
+    else:
+        response_ = {"response":error,"status":400}
+        background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'error')        
+
+    return JSONResponse(content =response_, status_code=response_['status'])
+
+@app.post("/append/org-new")
+async def custom_link(request: Request, background_tasks: BackgroundTasks, user_email: str = Depends(get_current_username)):
+    log_stream_name = create_logger()
+    cache = TwoLevelCache(db.redis)    
+    background_tasks.add_task(log_to_cloudwatch, f'log_stream_name: {log_stream_name}', 'info')        
+    search_product='BQ_APPEND_API'
+    search_universe='org'
+    background_tasks.add_task(log_to_cloudwatch, f'user_email: {user_email}', 'info')    
+    background_tasks.add_task(log_to_cloudwatch, f'Product:{search_product} search universe:{search_universe}', 'info')            
+    
     final_response={}
     try:
         request = await request.json()
         payload_log = request
-        # print('request:', request)
-        logger.info(f'request:{request}')        
-    except Exception as e:
-        logger.info({"Error":"Invalid payload format"})
-        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)
+    except Exception as e:        
+        background_tasks.add_task(logger.error({"Error":"Invalid payload format"}))
+        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)    
     
     error = utils.validate_fields(request, search_product, search_universe)
     if error:
-        logger.info(f'Error: {error}')
-
-    if error is not None:
-        response_ = {"response":error,"status":400}
-    else:    
+        background_tasks.add_task(log_to_cloudwatch,f'Error: {error}' , 'error')        
+        
+    if error is None:
         request = utils.field_mapping(request, search_product, search_universe)
-        logger.info(f'request_new: {request}')
-        yql,field,user_id,tab,ult_selection,orderby,type,filter,ranking,hits,limit,offset,isAsc,user_level,side_bar,request,search_universe =utils.initialize_parameters(request)
-        logger.info(f'request keys: {request.keys()} request values: {request.values()} ult_selection {ult_selection}, orderby: {orderby} isAsc:{isAsc}')        
+        cached_response = await cache.get_cached_response(
+            'append/org-new',
+            request
+        )
+        if cached_response:
 
-        for field, query in request.items():
-            if query:
-                print('search_universe', search_universe, 'field', field)
-                matrix = FIELD_MATRIX_MAPPING[search_product][search_universe][field]
-                if ('exact' in field) & ('ticker' in field):
-                    field = field.split('_exact')[0]
-                    matrix='search_by_ticker_matches'
-                print('\nmatrix:', matrix, 'field:',field, 'query:',query,'\n')            
-                matrix_mapping = {
-                            "search_by_ticker_prefix":utils.search_ticker_prefix,
-                            "search_by_ticker_matches":utils.search_ticker_matches,
-                            "search_by_address":utils.search_by_address,
-                            "search":utils.search,
-                            "company_name":utils.company_name_updated,
-                            }
-                try:
-                    if matrix_mapping.get(matrix,None) != None:                    
-                        if matrix in ["search_by_ticker_matches","db_filters","Parent_Details","company_name","search", "search_by_bq_location_name"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product)
-                        elif matrix in ["search_by_ticker_prefix"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, "external", search_product, user_id )
-                        elif matrix in ["search_by_address","search_by_location_address"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product,ult_selection)
-                        elif matrix in ['officer_details',"Search_by_officers"] :
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, search_product, user_id, '', '', '', '', '')
+            return JSONResponse(content=cached_response)
+        else:
+            background_tasks.add_task(log_to_cloudwatch, f'request::{request}', 'info')    
+            req_query    =[]
+            for field, query in request.items():
+                if field !='search_universe':
+                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_query.append(req_dict)        
+            background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
-                        # print(field,'response:',response)
-
-                        final_response[field] = response['response']
-                    else:
-                        logger.info({"response":"Invalid matrix used","status":400})
-                        response = {"response":"Invalid matrix used","status":400}
-                except Exception as e:
-                    return JSONResponse(content = {"error":str(e)}, status_code=400)
-
-        response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
-        logger.info(f'final response: {response_}')
+            with Pool() as pool:  # Adjust number of processes as needed
+                final_response =pool.map(process_request, req_query)
+                pool.close()
+                pool.join()        
+            response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
+            await cache.set_cached_response(
+                'append/org-new',
+                request,
+                response_,
+                expire=CACHE_LIMIT  # 5 minutes
+            )
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'info')        
+    else:
+        response_ = {"response":error,"status":400}
+        background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'error')        
 
     return JSONResponse(content =response_, status_code=response_['status'])
 
 @app.post("/append/le")
-async def custom_link(request: Request, user_email: str = Depends(get_current_username)):
+async def custom_link(request: Request, background_tasks: BackgroundTasks, user_email: str = Depends(get_current_username)):
     log_stream_name = create_logger()
-    logger.info(f'log_stream_name: {log_stream_name}')
+    cache = TwoLevelCache(db.redis)    
+    background_tasks.add_task(log_to_cloudwatch, f'log_stream_name: {log_stream_name}', 'info')        
     search_product='BQ_APPEND_API'
     search_universe='le'
-    logger.info(f'user_email: {user_email}')     
-    logger.info(f'Product:{search_product} search universe:{search_universe}')  
+    background_tasks.add_task(log_to_cloudwatch, f'user_email: {user_email}', 'info')    
+    background_tasks.add_task(log_to_cloudwatch, f'Product:{search_product} search universe:{search_universe}', 'info')            
+    
     final_response={}
+    payload_log={}
     try:
         request = await request.json()
         payload_log = request
-        # print('request:', request)
-        logger.info(f'request:{request}')        
-    except Exception as e:
-        logger.info({"Error":"Invalid payload format"})
-        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)
+    except Exception as e:        
+        background_tasks.add_task(logger.error({"Error":"Invalid payload format"}))
+        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)    
     
     error = utils.validate_fields(request, search_product, search_universe)
     if error:
-        logger.info(f'Error: {error}')
-
-    if error is not None:
-        response_ = {"response":error,"status":400}
-    else:    
+        background_tasks.add_task(log_to_cloudwatch,f'Error: {error}' , 'error')        
+        
+    if error is None:
         request = utils.field_mapping(request, search_product, search_universe)
-        logger.info(f'request_new: {request}')
-        yql,field,user_id,tab,ult_selection,orderby,type,filter,ranking,hits,limit,offset,isAsc,user_level,side_bar,request,search_universe =utils.initialize_parameters(request)
-        logger.info(f'request keys: {request.keys()} request values: {request.values()} ult_selection {ult_selection}, orderby: {orderby} isAsc:{isAsc}')        
+        cached_response = await cache.get_cached_response(
+            f'{search_product}/{search_universe}',
+            request
+        )
+        if cached_response:
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {cached_response}' , 'info')        
+            return JSONResponse(content =cached_response, status_code=cached_response['status'])
+        else:
+            background_tasks.add_task(log_to_cloudwatch, f'request::{request}', 'info')    
+            req_query    =[]
+            for field, query in request.items():
+                if field !='search_universe':
+                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_query.append(req_dict)        
+            background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
-        for field, query in request.items():
-            if query:
-                print('search_universe', search_universe, 'field', field)
-                matrix = FIELD_MATRIX_MAPPING[search_product][search_universe][field]
-                if ('exact' in field) & ('ticker' in field):
-                    field = field.split('_exact')[0]
-                    matrix='search_by_ticker_matches'
-                print('\nmatrix:', matrix, 'field:',field, 'query:',query,'\n')            
-                matrix_mapping = {
-                            "search_by_address":utils.search_by_address,
-                            "search":utils.search,
-                            "company_name":utils.company_name_updated,
-                            }
-                try:
-                    if matrix_mapping.get(matrix,None) != None:                    
-                        if matrix in ["search_by_ticker_matches","db_filters","Parent_Details","company_name","search", "search_by_bq_location_name"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product)
-                        elif matrix in ["search_by_ticker_prefix"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, "external", search_product, user_id )
-                        elif matrix in ["search_by_address","search_by_location_address"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product,ult_selection)
-                        elif matrix in ['officer_details',"Search_by_officers"] :
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, search_product, user_id, '', '', '', '', '')
-
-                        final_response[field] = response['response']
-                    else:
-                        logger.info({"response":"Invalid matrix used","status":400})
-                        response = {"response":"Invalid matrix used","status":400}
-                except Exception as e:
-                    return JSONResponse(content = {"error":str(e)}, status_code=400)
-
-                    response = except_error
-
-        response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
-        logger.info(f'final response: {response_}')
+            with Pool() as pool:  # Adjust number of processes as needed
+                final_response =pool.map(process_request, req_query)
+                pool.close()
+                pool.join()        
+            response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
+            await cache.set_cached_response(
+                f'{search_product}/{search_universe}',
+                request,
+                response_,
+                expire=CACHE_LIMIT  # 5 minutes
+            )
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'info')        
+    else:
+        response_ = {"response":error,"status":400}
+        background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'error')        
 
     return JSONResponse(content =response_, status_code=response_['status'])
 
 @app.post("/append/location")
-async def custom_link(request: Request, user_email: str = Depends(get_current_username)):
+async def custom_link(request: Request, background_tasks: BackgroundTasks, user_email: str = Depends(get_current_username)):
     log_stream_name = create_logger()
-    logger.info(f'log_stream_name: {log_stream_name}')
+    cache = TwoLevelCache(db.redis)    
+    background_tasks.add_task(log_to_cloudwatch, f'log_stream_name: {log_stream_name}', 'info')        
     search_product='BQ_APPEND_LOCATION_API'
     search_universe='location'
-    logger.info(f'user_email: {user_email}')     
-    logger.info(f'Product:{search_product} search universe:{search_universe}')    
+    background_tasks.add_task(log_to_cloudwatch, f'user_email: {user_email}', 'info')    
+    background_tasks.add_task(log_to_cloudwatch, f'Product:{search_product} search universe:{search_universe}', 'info')            
+    
     final_response={}
+    payload_log={}
     try:
         request = await request.json()
         payload_log = request
-        # print('request:', request)
-        logger.info(f'request:{request}')        
-    except Exception as e:
-        logger.info({"Error":"Invalid payload format"})
-        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)
+    except Exception as e:        
+        background_tasks.add_task(logger.error({"Error":"Invalid payload format"}))
+        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)    
     
     error = utils.validate_fields(request, search_product, search_universe)
     if error:
-        logger.info(f'Error: {error}')
-
-    if error is not None:
-        response_ = {"response":error,"status":400}
-    else:    
+        background_tasks.add_task(log_to_cloudwatch,f'Error: {error}' , 'error')        
+        
+    if error is None:
         request = utils.field_mapping(request, search_product, search_universe)
-        logger.info(f'request_new: {request}')
-        yql,field,user_id,tab,ult_selection,orderby,type,filter,ranking,hits,limit,offset,isAsc,user_level,side_bar,request,search_universe =utils.initialize_parameters(request)
-        logger.info(f'request keys: {request.keys()} request values: {request.values()} ult_selection {ult_selection}, orderby: {orderby} isAsc:{isAsc}')
+        cached_response = await cache.get_cached_response(
+            f'{search_product}/{search_universe}',
+            request
+        )
+        if cached_response:
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {cached_response}' , 'info')        
+            return JSONResponse(content =cached_response, status_code=cached_response['status'])
+        else:
+            background_tasks.add_task(log_to_cloudwatch, f'request::{request}', 'info')    
+            req_query    =[]
+            for field, query in request.items():
+                if field !='search_universe':
+                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_query.append(req_dict)        
+            background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
-        for field, query in request.items():
-            if query:
-                print('search_universe', search_universe, 'field', field)
-                matrix = FIELD_MATRIX_MAPPING[search_product][search_universe][field]                
-                print('\nmatrix:', matrix, 'field:',field, 'query:',query,'\n')            
-                matrix_mapping = {
-                                "search_by_location_address":utils.search_by_location_address_updated,
-                                "search_by_bq_location_name":utils.search_by_bq_location_name
-                            }
-                try:
-                    if matrix_mapping.get(matrix,None) != None:                    
-                        if matrix in ["search_by_ticker_matches","db_filters","Parent_Details","company_name","search", "search_by_bq_location_name"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product)
-                        elif matrix in ["search_by_ticker_prefix"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, "external", search_product, user_id )
-                        elif matrix in ["search_by_address","search_by_location_address"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product,ult_selection)
-                        elif matrix in ['officer_details',"Search_by_officers"] :
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, search_product, user_id, '', '', '', '', '')
+            with Pool() as pool:  # Adjust number of processes as needed
+                final_response =pool.map(process_request, req_query)
+                pool.close()
+                pool.join()        
+            response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
+            await cache.set_cached_response(
+                f'{search_product}/{search_universe}',
+                request,
+                response_,
+                expire=CACHE_LIMIT  # 5 minutes
+            )
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'info')        
+    else:
+        response_ = {"response":error,"status":400}
+        background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'error')        
 
-                        final_response[field] = response['response']
-                    else:
-                        logger.info({"response":"Invalid matrix used","status":400})
-                        response = {"response":"Invalid matrix used","status":400}
-                except Exception as e:
-                    return JSONResponse(content = {"error":str(e)}, status_code=400)
-
-                    response = except_error
-
-        response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
-        logger.info(f'final response: {response_}')
-
-    return JSONResponse(content =response_, status_code=response_['status'])    
+    return JSONResponse(content =response_, status_code=response_['status'])  
 
 @app.post("/append/executives")
-async def custom_link(request: Request, user_email: str = Depends(get_current_username)):
+async def custom_link(request: Request, background_tasks: BackgroundTasks, user_email: str = Depends(get_current_username)):
     log_stream_name = create_logger()
-    logger.info(f'log_stream_name: {log_stream_name}')
+    cache = TwoLevelCache(db.redis)    
+    background_tasks.add_task(log_to_cloudwatch, f'log_stream_name: {log_stream_name}', 'info')        
     search_product='BQ_APPEND_EXECUTIVES_API'
     search_universe='executives'
-    logger.info(f'user_email: {user_email}')     
-    logger.info(f'Product:{search_product} search universe:{search_universe}')    
+    background_tasks.add_task(log_to_cloudwatch, f'user_email: {user_email}', 'info')    
+    background_tasks.add_task(log_to_cloudwatch, f'Product:{search_product} search universe:{search_universe}', 'info')            
+    
     final_response={}
+    payload_log={}
     try:
         request = await request.json()
         payload_log = request
-        # print('request:', request)
-        logger.info(f'request:{request}')        
-    except Exception as e:
-        logger.info({"Error":"Invalid payload format"})
-        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)
+    except Exception as e:        
+        background_tasks.add_task(logger.error({"Error":"Invalid payload format"}))
+        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)    
     
     error = utils.validate_fields(request, search_product, search_universe)
     if error:
-        logger.info(f'Error: {error}')
-
-    if error is not None:
-        response_ = {"response":error,"status":400}
-    else:    
+        background_tasks.add_task(log_to_cloudwatch,f'Error: {error}' , 'error')        
+        
+    if error is None:
         request = utils.field_mapping(request, search_product, search_universe)
-        logger.info(f'request_new: {request}')
-        yql,field,user_id,tab,ult_selection,orderby,type,filter,ranking,hits,limit,offset,isAsc,user_level,side_bar,request,search_universe =utils.initialize_parameters(request)
-        logger.info(f'request keys: {request.keys()} request values: {request.values()} ult_selection {ult_selection}, orderby: {orderby} isAsc:{isAsc}')
+        cached_response = await cache.get_cached_response(
+            f'{search_product}/{search_universe}',
+            request
+        )
+        if cached_response:
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {cached_response}' , 'info')        
+            return JSONResponse(content =cached_response, status_code=cached_response['status'])
+        else:
+            background_tasks.add_task(log_to_cloudwatch, f'request::{request}', 'info')    
+            req_query    =[]
+            for field, query in request.items():
+                if field !='search_universe':
+                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_query.append(req_dict)        
+            background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
-        for field, query in request.items():
-            if query:
-                print('search_universe', search_universe, 'field', field)
-                matrix = FIELD_MATRIX_MAPPING[search_product][search_universe][field]                
-                print('\nmatrix:', matrix, 'field:',field, 'query:',query,'\n')            
-                matrix_mapping = {
-                                "Search_by_executive": utils.Search_by_executive_updated,
-                                "Search_by_executive_other": utils.search_executive_other,
-                            }
-                try:
-                    if matrix_mapping.get(matrix,None) != None:                    
-                        if matrix in ["search_by_ticker_matches","db_filters","Parent_Details","company_name","search", "search_by_bq_location_name","Search_by_executive_other"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product)
-                        elif matrix in ["search_by_ticker_prefix"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, "external", search_product, user_id )
-                        elif matrix in ["search_by_address","search_by_location_address"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product,ult_selection)
-                        elif matrix in ['officer_details',"Search_by_officers"] :
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, search_product, user_id, '', '', '', '', '')
-                        elif matrix in ["Search_by_executive",'officer_details',"Search_by_officers"] :
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, '', '', '', '', '')
-
-                        final_response[field] = response['response']
-                    else:
-                        logger.info({"response":"Invalid matrix used","status":400})
-                        response = {"response":"Invalid matrix used","status":400}
-                except Exception as e:
-                    return JSONResponse(content = {"error":str(e)}, status_code=400)
-
-                    response = except_error
-
-        response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
-        logger.info(f'final response: {response_}')
+            with Pool() as pool:  # Adjust number of processes as needed
+                final_response =pool.map(process_request, req_query)
+                pool.close()
+                pool.join()        
+            response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
+            await cache.set_cached_response(
+                f'{search_product}/{search_universe}',
+                request,
+                response_,
+                expire=CACHE_LIMIT  # 5 minutes
+            )
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'info')        
+    else:
+        response_ = {"response":error,"status":400}
+        background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'error')        
 
     return JSONResponse(content =response_, status_code=response_['status'])
 
 @app.post("/bi/org")
-async def custom_link(request: Request, user_email: str = Depends(get_current_username)):
+async def custom_link(request: Request, background_tasks: BackgroundTasks, user_email: str = Depends(get_current_username)):
     log_stream_name = create_logger()
-    logger.info(f'log_stream_name: {log_stream_name}')
+    cache = TwoLevelCache(db.redis)    
+    background_tasks.add_task(log_to_cloudwatch, f'log_stream_name: {log_stream_name}', 'info')        
     search_product='BQ_BUSINESS_IDENTITY_API'
     search_universe='org'
-    logger.info(f'user_email: {user_email}')
-    logger.info(f'Product:{search_product} search universe:{search_universe}')   
+    background_tasks.add_task(log_to_cloudwatch, f'user_email: {user_email}', 'info')    
+    background_tasks.add_task(log_to_cloudwatch, f'Product:{search_product} search universe:{search_universe}', 'info')            
+    
     final_response={}
+    payload_log={}
     try:
         request = await request.json()
         payload_log = request
-        # print('request:', request)
-        logger.info(f'request:{request}')        
-    except Exception as e:
-        logger.info({"Error":"Invalid payload format"})
-        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)
+    except Exception as e:        
+        background_tasks.add_task(logger.error({"Error":"Invalid payload format"}))
+        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)    
     
     error = utils.validate_fields(request, search_product, search_universe)
     if error:
-        logger.info(f'Error: {error}')
-
-    if error is not None:
-        response_ = {"response":error,"status":400}
-    else:    
+        background_tasks.add_task(log_to_cloudwatch,f'Error: {error}' , 'error')        
+        
+    if error is None:
         request = utils.field_mapping(request, search_product, search_universe)
-        logger.info(f'request_new: {request}')
-        yql,field,user_id,tab,ult_selection,orderby,type,filter,ranking,hits,limit,offset,isAsc,user_level,side_bar,request,search_universe =utils.initialize_parameters(request)
-        logger.info(f'request keys: {request.keys()} request values: {request.values()} ult_selection {ult_selection}, orderby: {orderby} isAsc:{isAsc}')        
+        cached_response = await cache.get_cached_response(
+            f'{search_product}/{search_universe}',
+            request
+        )
+        if cached_response:
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {cached_response}' , 'info')        
+            return JSONResponse(content =cached_response, status_code=cached_response['status'])
+        else:
+            background_tasks.add_task(log_to_cloudwatch, f'request::{request}', 'info')    
+            req_query    =[]
+            for field, query in request.items():
+                if field !='search_universe':
+                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_query.append(req_dict)        
+            background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
-        for field, query in request.items():
-            if query:
-                print('search_universe', search_universe, 'field', field)
-                matrix = FIELD_MATRIX_MAPPING[search_product][search_universe][field]
-                if ('exact' in field) & ('ticker' in field):
-                    field = field.split('_exact')[0]
-                    matrix='search_by_ticker_matches'
-                print('\nmatrix:', matrix, 'field:',field, 'query:',query,'\n')            
-                matrix_mapping = {
-                            "search_by_ticker_prefix":utils.search_ticker_prefix,
-                            "search_by_ticker_matches":utils.search_ticker_matches,
-                            "search_by_address":utils.search_by_address,
-                            "search":utils.search,
-                            "company_name":utils.company_name_updated,
-                            }
-                try:
-                    if matrix_mapping.get(matrix,None) != None:                    
-                        if matrix in ["search_by_ticker_matches","db_filters","Parent_Details","company_name","search", "search_by_bq_location_name"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product)
-                        elif matrix in ["search_by_ticker_prefix"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, "external", search_product, user_id )
-                        elif matrix in ["search_by_address","search_by_location_address"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product,ult_selection)
-                        elif matrix in ['officer_details',"Search_by_officers"] :
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, search_product, user_id, '', '', '', '', '')
-
-                        # print(field,'response:',response)
-
-                        final_response[field] = response['response']
-                    else:
-                        logger.info({"response":"Invalid matrix used","status":400})
-                        response = {"response":"Invalid matrix used","status":400}
-                except Exception as e:
-                    return JSONResponse(content = {"error":str(e)}, status_code=400)
-
-        response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
-        logger.info(f'final response: {response_}')
+            with Pool() as pool:  # Adjust number of processes as needed
+                final_response =pool.map(process_request, req_query)
+                pool.close()
+                pool.join()        
+            response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
+            await cache.set_cached_response(
+                f'{search_product}/{search_universe}',
+                request,
+                response_,
+                expire=CACHE_LIMIT  # 5 minutes
+            )
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'info')        
+    else:
+        response_ = {"response":error,"status":400}
+        background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'error')        
 
     return JSONResponse(content =response_, status_code=response_['status'])
 
 @app.post("/bi/le")
-async def custom_link(request: Request, user_email: str = Depends(get_current_username)):
+async def custom_link(request: Request, background_tasks: BackgroundTasks, user_email: str = Depends(get_current_username)):
     log_stream_name = create_logger()
-    logger.info(f'log_stream_name: {log_stream_name}')
+    cache = TwoLevelCache(db.redis)    
+    background_tasks.add_task(log_to_cloudwatch, f'log_stream_name: {log_stream_name}', 'info')        
     search_product='BQ_BUSINESS_IDENTITY_API'
     search_universe='le'
-    logger.info(f'user_email: {user_email}')     
-    logger.info(f'Product:{search_product} search universe:{search_universe}')  
+    background_tasks.add_task(log_to_cloudwatch, f'user_email: {user_email}', 'info')    
+    background_tasks.add_task(log_to_cloudwatch, f'Product:{search_product} search universe:{search_universe}', 'info')            
+    
     final_response={}
+    payload_log={}
     try:
         request = await request.json()
         payload_log = request
-        # print('request:', request)
-        logger.info(f'request:{request}')        
-    except Exception as e:
-        logger.info({"Error":"Invalid payload format"})
-        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)
+    except Exception as e:        
+        background_tasks.add_task(logger.error({"Error":"Invalid payload format"}))
+        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)    
     
     error = utils.validate_fields(request, search_product, search_universe)
     if error:
-        logger.info(f'Error: {error}')
-
-    if error is not None:
-        response_ = {"response":error,"status":400}
-    else:    
+        background_tasks.add_task(log_to_cloudwatch,f'Error: {error}' , 'error')        
+        
+    if error is None:
         request = utils.field_mapping(request, search_product, search_universe)
-        logger.info(f'request_new: {request}')
-        yql,field,user_id,tab,ult_selection,orderby,type,filter,ranking,hits,limit,offset,isAsc,user_level,side_bar,request,search_universe =utils.initialize_parameters(request)
-        logger.info(f'request keys: {request.keys()} request values: {request.values()} ult_selection {ult_selection}, orderby: {orderby} isAsc:{isAsc}')        
+        cached_response = await cache.get_cached_response(
+            f'{search_product}/{search_universe}',
+            request
+        )
+        if cached_response:
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {cached_response}' , 'info')        
+            return JSONResponse(content =cached_response, status_code=cached_response['status'])
+        else:
+            background_tasks.add_task(log_to_cloudwatch, f'request::{request}', 'info')    
+            req_query    =[]
+            for field, query in request.items():
+                if field !='search_universe':
+                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_query.append(req_dict)        
+            background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
-        for field, query in request.items():
-            if query:
-                print('search_universe', search_universe, 'field', field)
-                matrix = FIELD_MATRIX_MAPPING[search_product][search_universe][field]
-                if ('exact' in field) & ('ticker' in field):
-                    field = field.split('_exact')[0]
-                    matrix='search_by_ticker_matches'
-                print('\nmatrix:', matrix, 'field:',field, 'query:',query,'\n')            
-                matrix_mapping = {
-                            "search_by_address":utils.search_by_address,
-                            "search":utils.search,
-                            "company_name":utils.company_name_updated,
-                            }
-                try:
-                    if matrix_mapping.get(matrix,None) != None:                    
-                        if matrix in ["search_by_ticker_matches","db_filters","Parent_Details","company_name","search", "search_by_bq_location_name"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product)
-                        elif matrix in ["search_by_ticker_prefix"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, "external", search_product, user_id )
-                        elif matrix in ["search_by_address","search_by_location_address"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product,ult_selection)
-                        elif matrix in ['officer_details',"Search_by_officers"] :
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, search_product, user_id, '', '', '', '', '')
-
-                        final_response[field] = response['response']
-                    else:
-                        logger.info({"response":"Invalid matrix used","status":400})
-                        response = {"response":"Invalid matrix used","status":400}
-                except Exception as e:
-                    return JSONResponse(content = {"error":str(e)}, status_code=400)
-
-                    response = except_error
-
-        response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
-        logger.info(f'final response: {response_}')
+            with Pool() as pool:  # Adjust number of processes as needed
+                final_response =pool.map(process_request, req_query)
+                pool.close()
+                pool.join()        
+            response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
+            await cache.set_cached_response(
+                f'{search_product}/{search_universe}',
+                request,
+                response_,
+                expire=CACHE_LIMIT  # 5 minutes
+            )
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'info')        
+    else:
+        response_ = {"response":error,"status":400}
+        background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'error')        
 
     return JSONResponse(content =response_, status_code=response_['status'])
 
 
 @app.post("/bi/location")
-async def custom_link(request: Request, user_email: str = Depends(get_current_username)):
+async def custom_link(request: Request, background_tasks: BackgroundTasks, user_email: str = Depends(get_current_username)):
     log_stream_name = create_logger()
-    logger.info(f'log_stream_name: {log_stream_name}')
+    cache = TwoLevelCache(db.redis)    
+    background_tasks.add_task(log_to_cloudwatch, f'log_stream_name: {log_stream_name}', 'info')        
     search_product='BQ_BUSINESS_IDENTITY_LOCATION_API'
     search_universe='location'
-    logger.info(f'user_email: {user_email}')     
-    logger.info(f'Product:{search_product} search universe:{search_universe}')    
+    background_tasks.add_task(log_to_cloudwatch, f'user_email: {user_email}', 'info')    
+    background_tasks.add_task(log_to_cloudwatch, f'Product:{search_product} search universe:{search_universe}', 'info')            
+    
     final_response={}
+    payload_log={}
     try:
         request = await request.json()
         payload_log = request
-        # print('request:', request)
-        logger.info(f'request:{request}')        
-    except Exception as e:
-        logger.info({"Error":"Invalid payload format"})
-        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)
+    except Exception as e:        
+        background_tasks.add_task(logger.error({"Error":"Invalid payload format"}))
+        return JSONResponse(content = {"error":"Invalid payload format"}, status_code=400)    
     
     error = utils.validate_fields(request, search_product, search_universe)
     if error:
-        logger.info(f'Error: {error}')
-
-    if error is not None:
-        response_ = {"response":error,"status":400}
-    else:    
+        background_tasks.add_task(log_to_cloudwatch,f'Error: {error}' , 'error')        
+        
+    if error is None:
         request = utils.field_mapping(request, search_product, search_universe)
-        logger.info(f'request_new: {request}')
-        yql,field,user_id,tab,ult_selection,orderby,type,filter,ranking,hits,limit,offset,isAsc,user_level,side_bar,request,search_universe =utils.initialize_parameters(request)
-        logger.info(f'request keys: {request.keys()} request values: {request.values()} ult_selection {ult_selection}, orderby: {orderby} isAsc:{isAsc}')
+        cached_response = await cache.get_cached_response(
+            f'{search_product}/{search_universe}',
+            request
+        )
+        if cached_response:
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {cached_response}' , 'info')        
+            return JSONResponse(content =cached_response, status_code=cached_response['status'])
+        else:
+            background_tasks.add_task(log_to_cloudwatch, f'request::{request}', 'info')    
+            req_query    =[]
+            for field, query in request.items():
+                if field !='search_universe':
+                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_query.append(req_dict)        
+            background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
-        for field, query in request.items():
-            if query:
-                print('search_universe', search_universe, 'field', field)
-                matrix = FIELD_MATRIX_MAPPING[search_product][search_universe][field]                
-                print('\nmatrix:', matrix, 'field:',field, 'query:',query,'\n')            
-                matrix_mapping = {
-                                "search_by_location_address":utils.search_by_location_address_updated,
-                                "search_by_bq_location_name":utils.search_by_bq_location_name
-                            }
-                try:
-                    if matrix_mapping.get(matrix,None) != None:                    
-                        if matrix in ["search_by_ticker_matches","db_filters","Parent_Details","company_name","search", "search_by_bq_location_name"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product)
-                        elif matrix in ["search_by_ticker_prefix"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, "external", search_product, user_id )
-                        elif matrix in ["search_by_address","search_by_location_address"]:
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, user_id, "external",search_product,ult_selection)
-                        elif matrix in ['officer_details',"Search_by_officers"] :
-                            response = matrix_mapping[matrix](query, yql, type, filter, ranking, hits, limit, offset, orderby, isAsc, field, search_product, user_id, '', '', '', '', '')
-
-                        final_response[field] = response['response']
-                    else:
-                        logger.info({"response":"Invalid matrix used","status":400})
-                        response = {"response":"Invalid matrix used","status":400}
-                except Exception as e:
-                    return JSONResponse(content = {"error":str(e)}, status_code=400)
-
-                    response = except_error
-
-        response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
-        logger.info(f'final response: {response_}')
+            with Pool() as pool:  # Adjust number of processes as needed
+                final_response =pool.map(process_request, req_query)
+                pool.close()
+                pool.join()        
+            response_ =  utils.merge_responses(final_response, search_universe,search_product, payload_log,is_test=False)
+            await cache.set_cached_response(
+                f'{search_product}/{search_universe}',
+                request,
+                response_,
+                expire=CACHE_LIMIT  # 5 minutes
+            )
+            background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'info')        
+    else:
+        response_ = {"response":error,"status":400}
+        background_tasks.add_task(log_to_cloudwatch,f'final response: {response_}' , 'error')        
 
     return JSONResponse(content =response_, status_code=response_['status'])
 
-# uvicorn api:app --reload --host 0.0.0.0 --port 5000
+# uvicorn api:app --reload --host 0.0.0.0 --port 5001 --workers 4
 # nohup uvicorn api:app --reload --host 0.0.0.0 --port 5000 &
 # cd /home/ubuntu/terminal/Backend/Operations; source /home/ubuntu/terminal/Backend/Operations/venv/bin/activat
