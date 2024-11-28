@@ -241,7 +241,7 @@ async def custom_link(request: Request, background_tasks: BackgroundTasks, user_
             req_query    =[]
             for field, query in request.items():
                 if field !='search_universe':
-                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_dict = {field:query, 's#p':search_product, 's#u':search_universe}            
                     req_query.append(req_dict)        
             background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
@@ -300,7 +300,7 @@ async def custom_link(request: Request, background_tasks: BackgroundTasks, user_
             req_query    =[]
             for field, query in request.items():
                 if field !='search_universe':
-                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_dict = {field:query, 's#p':search_product, 's#u':search_universe}            
                     req_query.append(req_dict)        
             background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
@@ -359,7 +359,7 @@ async def custom_link(request: Request, background_tasks: BackgroundTasks, user_
             req_query    =[]
             for field, query in request.items():
                 if field !='search_universe':
-                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_dict = {field:query, 's#p':search_product, 's#u':search_universe}            
                     req_query.append(req_dict)        
             background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
@@ -418,7 +418,7 @@ async def custom_link(request: Request, background_tasks: BackgroundTasks, user_
             req_query    =[]
             for field, query in request.items():
                 if field !='search_universe':
-                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_dict = {field:query, 's#p':search_product, 's#u':search_universe}            
                     req_query.append(req_dict)        
             background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
@@ -476,7 +476,7 @@ async def custom_link(request: Request, background_tasks: BackgroundTasks, user_
             req_query    =[]
             for field, query in request.items():
                 if field !='search_universe':
-                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_dict = {field:query, 's#p':search_product, 's#u':search_universe}            
                     req_query.append(req_dict)        
             background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
@@ -535,7 +535,7 @@ async def custom_link(request: Request, background_tasks: BackgroundTasks, user_
             req_query    =[]
             for field, query in request.items():
                 if field !='search_universe':
-                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_dict = {field:query, 's#p':search_product, 's#u':search_universe}            
                     req_query.append(req_dict)        
             background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
@@ -594,10 +594,10 @@ async def custom_link(request: Request, background_tasks: BackgroundTasks, user_
             req_query    =[]
             for field, query in request.items():
                 if field !='search_universe':
-                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_dict = {field:query, 's#p':search_product, 's#u':search_universe}            
                     req_query.append(req_dict)        
             background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
-
+            
             with Pool() as pool:  # Adjust number of processes as needed
                 final_response =pool.map(process_request, req_query)
                 pool.close()
@@ -653,7 +653,7 @@ async def custom_link(request: Request, background_tasks: BackgroundTasks, user_
             req_query    =[]
             for field, query in request.items():
                 if field !='search_universe':
-                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_dict = {field:query, 's#p':search_product, 's#u':search_universe}            
                     req_query.append(req_dict)        
             background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
@@ -712,7 +712,7 @@ async def custom_link(request: Request, background_tasks: BackgroundTasks, user_
             req_query    =[]
             for field, query in request.items():
                 if field !='search_universe':
-                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_dict = {field:query, 's#p':search_product, 's#u':search_universe}            
                     req_query.append(req_dict)        
             background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
@@ -771,7 +771,7 @@ async def custom_link(request: Request, background_tasks: BackgroundTasks, user_
             req_query    =[]
             for field, query in request.items():
                 if field !='search_universe':
-                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_dict = {field:query, 's#p':search_product, 's#u':search_universe}            
                     req_query.append(req_dict)        
             background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 
@@ -831,7 +831,7 @@ async def custom_link(request: Request, background_tasks: BackgroundTasks, user_
             req_query    =[]
             for field, query in request.items():
                 if field !='search_universe':
-                    req_dict = {field:query, 'sp':search_product, 'su':search_universe}            
+                    req_dict = {field:query, 's#p':search_product, 's#u':search_universe}            
                     req_query.append(req_dict)        
             background_tasks.add_task(log_to_cloudwatch, f'req_query::{req_query}', 'info')            
 

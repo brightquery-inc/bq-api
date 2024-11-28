@@ -2889,7 +2889,7 @@ def initialize_parameters(request, search_universe):
     addressflag=companynameflag=0
     query=address=company_name=""
     ult_selection='orgAddress'
-    
+        
     for field, values in request.items():                
         if search_universe!='org':
             ult_selection=''
@@ -2922,7 +2922,7 @@ def initialize_parameters(request, search_universe):
     else:
         isAsc='False'
 
-    print('orderby::',orderby,'isAsc',isAsc)
+    # print('orderby::',orderby,'isAsc',isAsc)
     # exit()
     return yql,field,user_id,tab,ult_selection,orderby,type,filter,ranking,hits,limit,offset,isAsc,user_level,side_bar,request,search_universe
 
@@ -4095,15 +4095,17 @@ def process_request(req):
     final_response={}
     request=search_universe=search_product=""
     for k, v in req.items():
-        if 'su' in k:
+        if 's#u' in k:
             search_universe=v
-        elif 'sp' in k:
+        elif 's#p' in k:
             search_product=v
         else:
             request={k:v}
     # print('search_product:',search_product,'search_universe:',search_universe)
+    # print('Request inside::::',req)
+    # print('Acutal req::::',request)
     yql,field,user_id,tab,ult_selection,orderby,type,filter,ranking,hits,limit,offset,isAsc,user_level,side_bar,request,search_universe =initialize_parameters(request, search_universe)
-    # print(req)
+    
     # print(request)
     # print('search_product:',search_product,'search_universe:',search_universe)
     for field, query in request.items():
